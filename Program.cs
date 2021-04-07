@@ -34,44 +34,57 @@ namespace netcracker
         public Crypto Crypto { get; set; }
     }
 
+    class KeccakOpen : Keccak
+    {
+        public KeccakOpen(KeccakBitType bitType) : base(bitType)
+        {
+        }
+
+        public byte[] HashBytes(byte[] bytesToHash, int length)
+        {
+            base.Initialize((int)HashType.Keccak);
+            base.Absorb(bytesToHash, 0, length);
+            base.Partial(bytesToHash, 0, length);
+
+            return base.Squeeze();
+        }
+    }
+
     class Program
     {
         static DateTime start;
+        static int n;
+        static int r;
+        static int p;
+        static int dkLen;
 
-        static bool RunWith(string password, byte[] saltBytes, int n, int r, int p, int dkLen, byte[] cipherBytes, byte[] mac)
+        static byte[] saltBytes;
+        static byte[] cipherBytes;
+        static byte[] macBytes;
+
+        static bool RunWith(string password)
         {
             // Get scrypt hash from given values.
             var scrypt = ScryptUtil.Scrypt(password, saltBytes, n, r, p, dkLen);
-            
-            // Get data for hashing.
-            var input = new byte[16 + cipherBytes.Length];
+
+            // Get data for hashing. Fill with concatenation.
+            var inputLength = 16 + cipherBytes.Length;
+            var input = new byte[inputLength];
             Buffer.BlockCopy(scrypt, 16, input, 0, 16);
             Buffer.BlockCopy(cipherBytes, 0, input, 16, cipherBytes.Length);
 
-            // Get SHA3/KECCAK value of data.
-            var sha3 = new Keccak(KeccakBitType.K256);
-            var hash = Convert.FromHexString(sha3.Hash(input));
+            // Get hash value of data.
+            var hasher = new KeccakOpen(KeccakBitType.K256);
+            var hash = hasher.HashBytes(input, inputLength);
 
-            // No.
-            if (mac.Length != hash.Length)
-                return false;
-
-            // If any not equal, return false.
-            for (var i = 0; i < mac.Length; i++)
-                if (mac[i] != hash[i])
-                    return false;
-
-            // All equal, return true.
-            return true;
+            // Return true if equal length and sequence equal.
+            return macBytes.Length == hash.Length && macBytes.AsSpan().SequenceEqual(hash);
         }
 
         static async Task RunAll(string walletPath, string wordlistPath)
         {
             // Mark start.
             start = DateTime.Now;
-
-            // Get all words into large array.
-            var words = await File.ReadAllLinesAsync(wordlistPath);
 
             // Get wallet and parse it.
             using var walletStream = File.OpenRead(walletPath);
@@ -87,24 +100,26 @@ namespace netcracker
                 throw new ArgumentException("Incompatible KDF");
 
             // Get parameters.
-            var n = wallet.Crypto.KdfParams.N;
-            var r = wallet.Crypto.KdfParams.R;
-            var p = wallet.Crypto.KdfParams.P;
-            var salt = wallet.Crypto.KdfParams.Salt;
-            var dkLen = wallet.Crypto.KdfParams.DkLen;
-            var cipherText = wallet.Crypto.CipherText;
-            var mac = wallet.Crypto.Mac;
+            n = wallet.Crypto.KdfParams.N;
+            r = wallet.Crypto.KdfParams.R;
+            p = wallet.Crypto.KdfParams.P;
+            dkLen = wallet.Crypto.KdfParams.DkLen;
 
             // Get bytes from hexadecimal values.
-            var saltBytes = Convert.FromHexString(salt);
-            var cipherBytes = Convert.FromHexString(cipherText);
-            var macBytes = Convert.FromHexString(mac);
+            saltBytes = Convert.FromHexString(wallet.Crypto.KdfParams.Salt);
+            cipherBytes = Convert.FromHexString(wallet.Crypto.CipherText);
+            macBytes = Convert.FromHexString(wallet.Crypto.Mac);
+
+            // Get all words into large array.
+            var words = await File.ReadAllLinesAsync(wordlistPath);
 
             // Run on all words.
-            Parallel.ForEach(words, word =>
+            Parallel.For(0, words.Length,  i =>
             {
+                // Get word.
+                var word = words[i];
                 // If pass successful with this word, print result and exit program.
-                if (RunWith(word, saltBytes, n, r, p, dkLen, cipherBytes, macBytes))
+                if (RunWith(word))
                 {
                     Console.WriteLine("Run for {0}", DateTime.Now - start);
                     Console.WriteLine("Password: " + word);
